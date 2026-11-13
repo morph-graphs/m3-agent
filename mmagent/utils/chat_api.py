@@ -16,6 +16,7 @@ import openai
 from concurrent.futures import ThreadPoolExecutor
 from time import sleep
 import logging
+import os
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -45,6 +46,9 @@ except:
     pass
 
 MAX_RETRIES = 5
+# EPIC-Morph port: "local" (default) embeds with a local model (utils/local_backends.py); "api" is upstream's
+# Azure OpenAI path (configs/api_config.json then needs azure_endpoint, api_version, api_key and qpm per model)
+BACKEND = os.environ.get("M3AGENT_BACKEND", "local")
 
 def get_response(model, messages, timeout=30):
     """Get chat completion response from specified model.
@@ -129,7 +133,7 @@ def get_embedding(model, text, timeout=15):
     return response.data[0].embedding, response.usage.total_tokens
 
 
-def get_embedding_with_retry(model, text, timeout=15):
+def get_embedding_with_retry(model, text, timeout=15, query=False):
     """Retry get_embedding up to MAX_RETRIES times with error handling.
 
     Args:
@@ -142,6 +146,9 @@ def get_embedding_with_retry(model, text, timeout=15):
     Raises:
         Exception: If all retries fail
     """
+    if BACKEND == "local":
+        from .local_backends import embed
+        return embed([text], query=query)[0], 0
     for i in range(MAX_RETRIES):
         try:
             return get_embedding(model, text, timeout)
@@ -151,7 +158,7 @@ def get_embedding_with_retry(model, text, timeout=15):
             continue
     raise Exception(f"Failed to get embedding after {MAX_RETRIES} retries")
 
-def parallel_get_embedding(model, texts, timeout=15):
+def parallel_get_embedding(model, texts, timeout=15, query=False):
     """Process multiple texts in parallel to get embeddings.
 
     Args:
@@ -161,6 +168,9 @@ def parallel_get_embedding(model, texts, timeout=15):
     Returns:
         tuple: (list of embeddings, total tokens used)
     """
+    if BACKEND == "local":   # query: a search query (gets the embedding model's query instruction)
+        from .local_backends import embed
+        return embed(texts, query=query), 0
     batch_size = config[model]["qpm"]
     embeddings = []
     total_tokens = 0

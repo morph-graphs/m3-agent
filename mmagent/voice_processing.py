@@ -32,21 +32,29 @@ processing_config = json.load(open("configs/processing_config.json"))
 
 MAX_RETRIES = processing_config["max_retries"]
 
-pretrained_state = torch.load("models/pretrained_eres2netv2.ckpt", map_location='cpu')
-model = {
-    'obj': 'speakerlab.models.eres2net.ERes2NetV2.ERes2NetV2',
-    'args': {
-        'feat_dim': 80,
-        'embedding_size': 192,
-    },
-}
-embedding_model = dynamic_import(model['obj'])(**model['args'])
-embedding_model.load_state_dict(pretrained_state)
-embedding_model.to(torch.device('cuda'))
-embedding_model.eval()
-feature_extractor = FBank(80, sample_rate=16000, mean_nor=True)
+# EPIC-Morph port: the speaker model loads on first use (not at import), from M3AGENT_ERES2NET
+ERES2NET_CKPT = os.environ.get("M3AGENT_ERES2NET", "models/pretrained_eres2netv2.ckpt")
+embedding_model, feature_extractor = None, None
+
+def _load_embedding_model():
+    global embedding_model, feature_extractor
+    pretrained_state = torch.load(ERES2NET_CKPT, map_location='cpu')
+    model = {
+        'obj': 'speakerlab.models.eres2net.ERes2NetV2.ERes2NetV2',
+        'args': {
+            'feat_dim': 80,
+            'embedding_size': 192,
+        },
+    }
+    embedding_model = dynamic_import(model['obj'])(**model['args'])
+    embedding_model.load_state_dict(pretrained_state)
+    embedding_model.to(torch.device('cuda'))
+    embedding_model.eval()
+    feature_extractor = FBank(80, sample_rate=16000, mean_nor=True)
 
 def get_embedding(wav):
+    if embedding_model is None:
+        _load_embedding_model()
 
     def load_wav(wav_file, obj_fs=16000):
         wav, fs = torchaudio.load(wav_file)
@@ -134,6 +142,8 @@ def process_voices(video_graph, base64_audio, base64_video, save_path, preproces
         return audio_segments
 
     def diarize_audio(base64_video, filter=None):
+        if os.environ.get("M3AGENT_BACKEND", "local") == "local":   # EPIC-Morph port: faster-whisper, see utils/local_backends.py
+            return [asr for asr in local_asr(base64_audio) if filter(asr)]
         input = [
             {
                 "type": "video_base64/mp4",
@@ -163,6 +173,21 @@ def process_voices(video_graph, base64_audio, base64_video, save_path, preproces
             
         asrs = [asr for asr in asrs if filter(asr)]
 
+        return asrs
+
+    def local_asr(base64_audio):
+        import tempfile
+        from .utils.local_backends import transcribe
+        wav = base64.b64decode(base64_audio)
+        duration = len(AudioSegment.from_wav(io.BytesIO(wav))) / 1000
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+            f.write(wav)
+            f.flush()
+            asrs = transcribe(f.name, duration)
+        for asr in asrs:
+            start_min, start_sec = map(int, asr["start_time"].split(':'))
+            end_min, end_sec = map(int, asr["end_time"].split(':'))
+            asr["duration"] = (end_min * 60 + end_sec) - (start_min * 60 + start_sec)
         return asrs
 
     def get_normed_audio_embeddings(audios):

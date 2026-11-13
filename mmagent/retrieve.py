@@ -94,7 +94,7 @@ def retrieve_from_videograph(video_graph, query, topk=5, mode='max', threshold=0
     related_nodes = get_related_nodes(video_graph, query)
 
     model = "text-embedding-3-large"
-    query_embeddings = parallel_get_embedding(model, queries)[0]
+    query_embeddings = parallel_get_embedding(model, queries, query=True)[0]
 
     full_clip_scores = {}
     clip_scores = {}

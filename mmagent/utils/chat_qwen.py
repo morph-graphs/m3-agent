@@ -13,6 +13,7 @@
 # limitations under the License.
 import json
 import logging
+import os
 import torch
 from transformers import Qwen2_5OmniProcessor, Qwen2_5OmniThinkerForConditionalGeneration, GenerationConfig
 from qwen_omni_utils import process_mm_info
@@ -38,13 +39,13 @@ def get_response(messages):
     global thinker, processor
     if thinker is None:
         thinker = Qwen2_5OmniThinkerForConditionalGeneration.from_pretrained(
-            processing_config["ckpt"],
+            os.environ.get("M3AGENT_MEM_CKPT", processing_config["ckpt"]),   # EPIC-Morph port: path from the environment
             torch_dtype="auto",
             device_map="auto",
             attn_implementation="flash_attention_2",
         )
         thinker.eval()
-        processor = Qwen2_5OmniProcessor.from_pretrained(processing_config["ckpt"])
+        processor = Qwen2_5OmniProcessor.from_pretrained(os.environ.get("M3AGENT_MEM_CKPT", processing_config["ckpt"]))
     text = processor.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     generation_config = GenerationConfig(pad_token_id=151643, bos_token_id=151644, eos_token_id=151645)
     

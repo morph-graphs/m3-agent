@@ -41,26 +41,5 @@ logging.getLogger("httpx").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 logging.getLogger("httpcore").setLevel(logging.CRITICAL)
 
-from . import retrieve
-from . import face_processing
-from . import memory_processing
-try:
-    if model == "qwen2.5-omni":
-        from . import memory_processing_qwen
-except:
-    pass
-from . import prompts
-from . import videograph
-from . import voice_processing
-from . import utils
-
-__all__ = [
-    "retrieve",
-    "face_processing",
-    "memory_processing",
-    "memory_processing_qwen" if model == "qwen2.5-omni" else None,
-    "prompts",
-    "videograph",
-    "voice_processing",
-    "utils",
-]
+# EPIC-Morph port: submodules are imported where they are used, not here. face_processing and voice_processing
+# load their models at import, and the control environment has neither insightface nor the memorization stack.

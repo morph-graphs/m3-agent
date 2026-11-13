@@ -14,6 +14,7 @@
 import base64
 import json
 import logging
+import os
 from io import BytesIO
 
 import numpy as np
@@ -29,7 +30,9 @@ from .memory_processing import parse_video_caption
 processing_config = json.load(open("configs/processing_config.json"))
 logging_level = processing_config["logging"]
 
-MAX_RETRIES = processing_config["max_retries"]
+# EPIC-Morph port: decoding is near-greedy (temperature 1e-6), so a retry repeats the same output; upstream's 20
+# retries of up to 4096 tokens only cost time. M3AGENT_MEM_RETRIES (default 3) caps them.
+MAX_RETRIES = int(os.environ.get("M3AGENT_MEM_RETRIES", 3))
 # Configure logging
 logger = logging.getLogger(__name__)
 
@@ -159,8 +162,16 @@ def generate_all_memories(video_context, model_type="sft"):
         if not memories_string:
             memories_string = "[]"
         memories = validate_and_fix_json(memories_string)
-        if memories is not None:
+        # EPIC-Morph port: the prompt asks for "video_description", the parser below reads "video_descriptions";
+        # accept either, and treat anything but such an object as a failed attempt
+        if isinstance(memories, dict) and "video_description" in memories and epi_key not in memories:
+            memories[epi_key] = memories.pop("video_description")
+        if isinstance(memories, dict) and isinstance(memories.get(epi_key, []), list) and isinstance(memories.get(sem_key, []), list):
+            memories.setdefault(epi_key, [])
+            memories.setdefault(sem_key, [])
             break
+        logger.warning(f"memorization output is not the expected JSON object (attempt {i + 1}): {memories_string[:300]}")
+        memories = None
     if memories is None:
         memories = {
             epi_key: [],
@@ -168,8 +179,8 @@ def generate_all_memories(video_context, model_type="sft"):
         }
         # raise Exception("Failed to generate memories")
     
-    episodic_memories = memories[epi_key]
-    semantic_memories = memories[sem_key]
+    episodic_memories = [m for m in memories[epi_key] if isinstance(m, str) and m.strip()]
+    semantic_memories = [m for m in memories[sem_key] if isinstance(m, str) and m.strip()]
     
     return episodic_memories, semantic_memories
 

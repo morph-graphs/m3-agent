@@ -15,6 +15,7 @@ from concurrent.futures import ThreadPoolExecutor
 from tqdm import tqdm
 import json
 import os
+import threading
 import logging
 from insightface.app import FaceAnalysis
 from mmagent.src.face_extraction import extract_faces
@@ -22,8 +23,19 @@ from mmagent.src.face_clustering import cluster_faces
 from mmagent.utils.video_processing import process_video_clip
 
 processing_config = json.load(open("configs/processing_config.json"))
-face_app = FaceAnalysis(name="buffalo_l")  # RetinaFace + ArcFace
-face_app.prepare(ctx_id=-1)
+# EPIC-Morph port: the face model loads on first use, from M3AGENT_INSIGHTFACE_ROOT (insightface downloads
+# buffalo_l there when it is missing); still on the CPU (ctx_id=-1) as upstream
+face_app = None
+_face_app_lock = threading.Lock()   # the batches below run in threads: one of them loads (or downloads) the model
+
+def _face_app():
+    global face_app
+    with _face_app_lock:
+        if face_app is None:
+            face_app = FaceAnalysis(name="buffalo_l", root=os.environ.get("M3AGENT_INSIGHTFACE_ROOT", "~/.insightface"))  # RetinaFace + ArcFace
+            face_app.prepare(ctx_id=-1)
+    return face_app
+
 cluster_size = processing_config["cluster_size"]
 logger = logging.getLogger(__name__)
 
@@ -36,7 +48,7 @@ class Face:
         self.extra_data = extra_data
 
 def get_face(frames):
-    extracted_faces = extract_faces(face_app, frames)
+    extracted_faces = extract_faces(_face_app(), frames)
     faces = [Face(frame_id=f['frame_id'], bounding_box=f['bounding_box'], face_emb=f['face_emb'], cluster_id=f['cluster_id'], extra_data=f['extra_data']) for f in extracted_faces]
     return faces
 

@@ -17,6 +17,10 @@ import logging
 import argparse
 import glob
 import pickle
+import random
+import time
+
+import numpy as np
 
 from mmagent.videograph import VideoGraph
 from mmagent.utils.video_processing import process_video_clip
@@ -67,20 +71,29 @@ def process_segment(
     process_memories(video_graph, semantic_memories, clip_id, type="semantic")
 
 def streaming_process_video(video_graph, sample):
-    """Process video segments at specified intervals with given fps.
+    """Process the clips of one video in order and save the memory graph to sample["mem_path"].
 
-    Args:
-        video_graph (VideoGraph): Graph object to store video information
-        video_path (str): Path to the video file or directory containing clips
-        interval_seconds (float): Time interval between segments in seconds
-        fps (float): Frames per second to extract from each segment
-
-    Returns:
-        None: Updates video_graph in place with processed segments
-    """
-    clips = glob.glob(sample["clip_path"] + "/*")
+    EPIC-Morph port: clips are taken in clip-id order (upstream's unsorted glob made node ids, and so truncation
+    by clip, depend on directory order); after each clip the graph and the RNG state are saved to
+    sample["partial_path"] (default <mem_path>.partial), and a rerun resumes from there (preemption); a JSON dump of the text memories is written
+    next to the graph (sample["json_path"], when given)."""
+    clips = sorted(glob.glob(sample["clip_path"] + "/*.mp4"), key=lambda p: int(os.path.basename(p).split(".")[0]))
+    partial = sample.get("partial_path", sample["mem_path"] + ".partial")
+    done = -1
+    random.seed(0)
+    np.random.seed(0)
+    if os.path.exists(partial):
+        with open(partial, "rb") as f:
+            state = pickle.load(f)
+        video_graph, done = state["graph"], state["clip_id"]
+        random.setstate(state["random"])
+        np.random.set_state(state["np_random"])
+        logger.warning(f"resuming {sample['id']} after clip {done}")
     for clip_path in clips:
         clip_id = int(clip_path.split("/")[-1].split(".")[0])
+        if clip_id <= done:
+            continue
+        t = time.time()
         base64_video, base64_frames, base64_audio = process_video_clip(clip_path)
 
         # Process frames for this interval
@@ -94,10 +107,35 @@ def streaming_process_video(video_graph, sample):
                 sample,
                 clip_path
             )
-    
+        with open(partial + ".tmp", "wb") as f:
+            pickle.dump({"graph": video_graph, "clip_id": clip_id, "random": random.getstate(),
+                         "np_random": np.random.get_state()}, f)
+        os.replace(partial + ".tmp", partial)
+        n_text = len(video_graph.text_nodes_by_clip.get(clip_id, []))
+        print(f"clip {clip_id + 1}/{len(clips)}: {n_text} memories, {len(video_graph.nodes)} nodes, {time.time() - t:.0f} s", flush=True)
+
     video_graph.refresh_equivalences()
-    with open(sample["mem_path"], "wb") as f:
+    with open(sample["mem_path"] + ".tmp", "wb") as f:
         pickle.dump(video_graph, f)
+    if sample.get("json_path"):
+        dump_memories(video_graph, sample["json_path"])
+    os.replace(sample["mem_path"] + ".tmp", sample["mem_path"])
+    os.remove(partial)
+
+
+def dump_memories(video_graph, path):
+    """The graph's text memories per clip, readable (EPIC-Morph port)."""
+    clips = {}
+    for clip_id in sorted(video_graph.text_nodes_by_clip):
+        nodes = [video_graph.nodes[n] for n in video_graph.text_nodes_by_clip[clip_id]]
+        clips[f"CLIP_{clip_id}"] = {t: [n.metadata["contents"][0] for n in nodes if n.type == t] for t in ("episodic", "semantic")}
+    out = {"n_nodes": len(video_graph.nodes),
+           "n_faces": sum(n.type == "img" for n in video_graph.nodes.values()),
+           "n_voices": sum(n.type == "voice" for n in video_graph.nodes.values()),
+           "characters": video_graph.character_mappings, "clips": clips}
+    with open(path, "w") as f:
+        json.dump(out, f, indent=1, ensure_ascii=False)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

@@ -868,13 +868,13 @@ class VideoGraph:
         # remove all nodes that are after the clip_id
         # return the truncated memory
         
-        # find the last node with clip_id
-        last_node_id = None
+        # find the last text node of clips up to clip_id. EPIC-Morph port: upstream looked only at clip_id itself and
+        # returned the whole memory, future included, when that clip had no text node; with no clip <= clip_id left,
+        # everything goes (nodes are created in clip order, so ids after that node belong to later clips)
+        last_node_id = -1
         for node_id, node in self.nodes.items():
-            if node.type in ['episodic', 'semantic'] and node.metadata['timestamp'] == clip_id:
-                last_node_id = node_id
-        if last_node_id is None:
-            return
+            if node.type in ['episodic', 'semantic'] and node.metadata['timestamp'] <= clip_id:
+                last_node_id = max(last_node_id, node_id)
         # remove all nodes that are after the last_node_id
         to_del = []
         for node_id in self.nodes.keys():
