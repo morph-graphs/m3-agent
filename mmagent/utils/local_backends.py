@@ -1,5 +1,5 @@
 # Local stand-ins for the closed APIs upstream calls (EPIC-Morph port; M3AGENT_BACKEND=local is the default,
-# M3AGENT_BACKEND=api restores the Azure OpenAI / Gemini calls of configs/api_config.json).
+# M3AGENT_BACKEND=api calls OpenAI embeddings and Gemini with plain API keys instead, see utils/chat_api.py).
 #
 # - embed(): Qwen3-Embedding-4B (M3AGENT_EMBED_MODEL) instead of OpenAI text-embedding-3-large, unit-normalised.
 #   Search queries get Qwen3-Embedding's query instruction; memories are embedded as plain text. The

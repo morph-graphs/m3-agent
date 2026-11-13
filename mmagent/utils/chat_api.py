@@ -46,9 +46,73 @@ except:
     pass
 
 MAX_RETRIES = 5
-# EPIC-Morph port: "local" (default) embeds with a local model (utils/local_backends.py); "api" is upstream's
-# Azure OpenAI path (configs/api_config.json then needs azure_endpoint, api_version, api_key and qpm per model)
+# EPIC-Morph port: "local" (default) embeds with a local model (utils/local_backends.py). "api" calls the published
+# APIs with plain keys from the environment instead of upstream's Azure clients (configs/api_config.json):
+# - embeddings: OpenAI (OPENAI_API_KEY), the model name upstream passes (text-embedding-3-large);
+# - speech segments (voice_processing.py): Gemini generateContent over REST (GEMINI_API_KEY), model
+#   M3AGENT_GEMINI_MODEL, default gemini-2.5-pro (upstream's gemini-1.5-pro-002 is retired).
+# The GPT-4o judge (control.py --judge) and the functions below that take `client[model]` still need api_config.json.
 BACKEND = os.environ.get("M3AGENT_BACKEND", "local")
+GEMINI_MODEL = os.environ.get("M3AGENT_GEMINI_MODEL", "gemini-2.5-pro")
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent"
+EMBED_BATCH = 64   # texts per OpenAI embeddings request
+_openai = None
+
+
+def _api_key(name):
+    key = os.environ.get(name)
+    if not key:
+        raise RuntimeError(f"M3AGENT_BACKEND=api needs {name} in the environment")
+    return key
+
+
+def api_embed(model, texts, timeout=60):
+    """OpenAI embeddings for a list of texts, in order (the SDK retries 429/5xx with backoff)."""
+    global _openai
+    if _openai is None:
+        _openai = openai.OpenAI(api_key=_api_key("OPENAI_API_KEY"), max_retries=MAX_RETRIES)
+    out = []
+    for i in range(0, len(texts), EMBED_BATCH):
+        batch = [t if t.strip() else " " for t in texts[i:i + EMBED_BATCH]]   # the API rejects empty strings
+        r = _openai.embeddings.create(model=model, input=batch, timeout=timeout)
+        out.extend(d.embedding for d in sorted(r.data, key=lambda d: d.index))
+    return out
+
+
+def gemini_generate(prompt, mime_type, b64data, schema=None, timeout=300):
+    """Gemini's JSON answer (as text; `schema`: an optional responseSchema) to one inline media part followed by
+    the prompt; "" when the answer is blocked or empty. Retries 429/5xx and network errors
+    with exponential backoff; other HTTP errors raise. The key goes in the x-goog-api-key header only."""
+    import requests
+    url = GEMINI_URL.format(GEMINI_MODEL)
+    headers = {"x-goog-api-key": _api_key("GEMINI_API_KEY"), "Content-Type": "application/json"}
+    body = {"contents": [{"role": "user", "parts": [{"inline_data": {"mime_type": mime_type, "data": b64data}},
+                                                    {"text": prompt}]}],
+            "generationConfig": {"temperature": temp, "responseMimeType": "application/json"}}
+    if schema:
+        body["generationConfig"]["responseSchema"] = schema
+    for i in range(MAX_RETRIES):
+        try:
+            r = requests.post(url, headers=headers, json=body, timeout=timeout)
+        except requests.RequestException as e:
+            err = type(e).__name__
+        else:
+            if r.status_code == 200:
+                res = r.json()
+                cands = res.get("candidates") or [{}]
+                parts = cands[0].get("content", {}).get("parts", [])
+                text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+                if not text:
+                    logger.warning(f"{GEMINI_MODEL}: empty answer (finishReason {cands[0].get('finishReason')}, "
+                                   f"promptFeedback {res.get('promptFeedback')})")
+                return text
+            if r.status_code != 429 and r.status_code < 500:
+                raise RuntimeError(f"{GEMINI_MODEL}: HTTP {r.status_code}: {r.text[:500]}")
+            err = f"HTTP {r.status_code}"
+        wait = min(10 * 2 ** i, 160)
+        logger.warning(f"{GEMINI_MODEL}: {err}, retry {i + 1}/{MAX_RETRIES} in {wait} s")
+        sleep(wait)
+    raise RuntimeError(f"{GEMINI_MODEL}: failed after {MAX_RETRIES} attempts")
 
 def get_response(model, messages, timeout=30):
     """Get chat completion response from specified model.
@@ -149,6 +213,8 @@ def get_embedding_with_retry(model, text, timeout=15, query=False):
     if BACKEND == "local":
         from .local_backends import embed
         return embed([text], query=query)[0], 0
+    if BACKEND == "api":
+        return api_embed(model, [text], max(timeout, 60))[0], 0
     for i in range(MAX_RETRIES):
         try:
             return get_embedding(model, text, timeout)
@@ -171,6 +237,8 @@ def parallel_get_embedding(model, texts, timeout=15, query=False):
     if BACKEND == "local":   # query: a search query (gets the embedding model's query instruction)
         from .local_backends import embed
         return embed(texts, query=query), 0
+    if BACKEND == "api":   # query: unused, OpenAI's embeddings take no instruction
+        return api_embed(model, list(texts), max(timeout, 60)), 0
     batch_size = config[model]["qpm"]
     embeddings = []
     total_tokens = 0

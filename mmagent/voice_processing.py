@@ -24,7 +24,6 @@ from speakerlab.utils.builder import dynamic_import
 
 from pydub import AudioSegment
 from .prompts import prompt_audio_segmentation
-from .utils.chat_api import generate_messages, get_response
 from .utils.general import validate_and_fix_json, normalize_embedding
 import io
 
@@ -144,34 +143,38 @@ def process_voices(video_graph, base64_audio, base64_video, save_path, preproces
     def diarize_audio(base64_video, filter=None):
         if os.environ.get("M3AGENT_BACKEND", "local") == "local":   # EPIC-Morph port: faster-whisper, see utils/local_backends.py
             return [asr for asr in local_asr(base64_audio) if filter(asr)]
-        input = [
-            {
-                "type": "video_base64/mp4",
-                "content": base64_video.decode("utf-8"),
-            },
-            {
-                "type": "text",
-                "content": prompt_audio_segmentation,
-            },
-        ]
-        messages = generate_messages(input)
-        model = "gemini-1.5-pro-002"
+        # EPIC-Morph port: upstream sent the clip's video to gemini-1.5-pro-002 through an Azure-style client; that
+        # model is retired, so the clip's audio (16 kHz WAV) goes to Gemini's REST API with the same prompt
+        # (utils/chat_api.py: M3AGENT_GEMINI_MODEL, GEMINI_API_KEY)
+        from .utils.chat_api import gemini_generate, GEMINI_MODEL
+        seg = {"type": "OBJECT", "properties": {k: {"type": "STRING"} for k in ("start_time", "end_time", "asr")},
+               "required": ["start_time", "end_time", "asr"]}
         asrs = None
-        for i in range(MAX_RETRIES):
-            # response, _ = get_response_with_retry(model, messages, timeout=30)
-            response, _ = get_response(model, messages, timeout=30)
-            asrs = validate_and_fix_json(response)
-            if asrs is not None:
+        for i in range(3):   # upstream: max_retries (20); decoding is near-greedy, so a retry mostly repeats the answer
+            response = gemini_generate(prompt_audio_segmentation, "audio/wav", base64_audio.decode("utf-8"),
+                                       schema={"type": "ARRAY", "items": seg})
+            asrs = validate_and_fix_json(response) if response else None
+            if isinstance(asrs, list):
                 break
-        if asrs is None:
-            raise Exception("Failed to diarize audio")
+            asrs = None
+        if asrs is None:   # upstream raised here; a deterministic failure would then stop the build at this clip forever
+            logger.warning(f"{GEMINI_MODEL}: no usable speech segments for this clip after 3 attempts; treating it as no speech")
+            asrs = []
 
+        kept = []
         for asr in asrs:
-            start_min, start_sec = map(int, asr["start_time"].split(':'))
-            end_min, end_sec = map(int, asr["end_time"].split(':'))
+            try:   # a segment without text or whose times are not MM:SS is dropped (get_audio_segments would drop it)
+                if not isinstance(asr["asr"], str) or not asr["asr"].strip():
+                    raise ValueError("no text")
+                start_min, start_sec = map(int, asr["start_time"].split(':'))
+                end_min, end_sec = map(int, asr["end_time"].split(':'))
+            except (KeyError, TypeError, AttributeError, ValueError):
+                logger.warning(f"dropped a speech segment: {asr}")
+                continue
             asr["duration"] = (end_min * 60 + end_sec) - (start_min * 60 + start_sec)
-            
-        asrs = [asr for asr in asrs if filter(asr)]
+            kept.append(asr)
+
+        asrs = [asr for asr in kept if filter(asr)]
 
         return asrs
 
