@@ -110,8 +110,13 @@ def transcribe(wav_path, duration):
         from faster_whisper import WhisperModel
         cuda = torch.cuda.is_available()
         if cuda:   # CTranslate2 dlopens cuBLAS / cuDNN by soname: load torch's pip copies first (not on LD_LIBRARY_PATH)
+            import ctypes.util
             import nvidia.cublas, nvidia.cudnn
-            libs = [l for d in (nvidia.cublas.__path__[0], nvidia.cudnn.__path__[0])
+            # ... unless the system has the same major version (a CUDA base image's): its loader then finds those, and
+            # loading the pip copies as well puts two of each cuDNN sub-library in the process, after which torch's GPU
+            # convolutions fail with an empty RuntimeError (the memorization model's audio encoder, from the first clip)
+            libs = [l for d, name in ((nvidia.cublas.__path__[0], "cublas"), (nvidia.cudnn.__path__[0], "cudnn"))
+                    if ctypes.util.find_library(name) not in os.listdir(os.path.join(d, "lib"))
                     for l in sorted(glob.glob(os.path.join(d, "lib", "lib*.so.*")))]
             for attempt in (0, 1):   # a second pass for libraries whose dependencies came later in the list
                 for lib in libs:
