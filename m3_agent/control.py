@@ -19,7 +19,8 @@
 #   chosen letter is compared with "answer" (no judge). Upstream's GPT-4o judge for open answers is --judge;
 # - every request seeded (reproducible sampling); searches run in this process (the embedding model is
 #   loaded once) on a cached copy of the graph truncated at the question's before_clip;
-# - each round's search and the clips it returned are kept (evidence-retrieval scoring); results are written
+# - each round's search and the clips it returned are kept (evidence-retrieval scoring), with the memory-graph walk
+#   (retrieve.walk_trace: entry entity nodes, ranked text nodes, their entity edges); results are written
 #   after every batch and a rerun skips the question ids already in --output;
 # - --blind: the same prompt with no memory, one round that must answer (the no-memory floor);
 # - a question still without [Answer] after the last round (the model often searches again in the round that
@@ -35,7 +36,7 @@ import random
 import zlib
 import argparse
 import mmagent.videograph
-from mmagent.retrieve import search
+from mmagent.retrieve import search, walk_trace
 from mmagent.utils.general import load_video_graph
 
 sys.modules["videograph"] = mmagent.videograph
@@ -139,6 +140,10 @@ def consumer(data, args, allow_search=True):
             data["currenr_clips"] = currenr_clips
             new_memories.update(memories)
         step["clips"] = [int(k.split("_")[1]) for k in new_memories]
+        try:   # logging only: never changes the answer
+            step["trace"] = walk_trace(mem_node, new_memories)
+        except Exception as e:
+            step["trace"] = {"error": f"{type(e).__name__}: {e}"[:200]}
     data["rounds"].append(step)
     search_result = "Searched knowledge: " + json.dumps(new_memories, ensure_ascii=False).encode("utf-8", "ignore").decode("utf-8")
     if len(new_memories) == 0:
@@ -182,7 +187,8 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
     done = set()
     if os.path.exists(output_path):
-        done = {json.loads(l)["id"] for l in open(output_path) if l.strip()}
+        # a row from before the walk trace ("traced") is answered again, unless blind (no searches to trace)
+        done = {r["id"] for r in map(json.loads, filter(str.strip, open(output_path))) if args.blind or r.get("traced")}
 
     data = []
     datas = json.load(open(args.data_file))
@@ -255,6 +261,7 @@ def main():
         with open(output_path, "a") as f:
             for d in batched_data:
                 d.pop("currenr_clips", None)
+                d["traced"] = not args.blind   # each search round carries its "trace"
                 if d.get("options"):
                     d["chosen"], d["parse"] = chosen_letter(d.get("response"), d["options"])
                     d["correct"] = d["chosen"] == d["answer"]

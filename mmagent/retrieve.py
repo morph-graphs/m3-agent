@@ -72,6 +72,32 @@ def back_translate(video_graph, queries):
         translated_queries.extend(to_be_translated)
     return translated_queries
 
+# EPIC-Morph port (logging only): what the last retrieve_from_videograph call walked, for walk_trace. Searches run
+# one after another in control.py, so one module-level record is enough.
+LAST = {}
+TRACE_NODES, TRACE_EDGES, TRACE_LABEL = 20, 60, 80   # caps per search: text nodes, node-entity edges, label characters
+
+
+def walk_trace(video_graph, memories):
+    """The last search, compactly: its entry points (the entity nodes the query names, which restrict the
+    search to their neighbours; none for a plain query), the text nodes ranked by query similarity (id, type,
+    clip, short text, score; the top TRACE_NODES), the clips ranked by score, the clips returned (`memories`
+    keys) and the edges from the ranked text nodes to entity nodes (face / voice, with the character they belong to)."""
+    nodes = LAST.get("nodes", [])
+    tag = lambda n: f"{'face' if video_graph.nodes[n].type == 'img' else 'voice'}_{n}"
+    ent = lambda n: {"id": n, "tag": tag(n), "character": video_graph.reverse_character_mappings.get(tag(n))}
+    top = {n for n, _ in nodes}
+    edges = [[n1, "links", tag(n2), round(float(w), 3)] for (n1, n2), w in video_graph.edges.items()
+             if n1 in top and video_graph.nodes[n2].type in ("img", "voice")]
+    return {"seeds": [ent(n) for n in LAST.get("related", []) if n in video_graph.nodes],
+            "nodes": [{"id": n, "type": video_graph.nodes[n].type, "clip": video_graph.nodes[n].metadata["timestamp"],
+                       "label": str(video_graph.nodes[n].metadata["contents"][0])[:TRACE_LABEL], "sim": round(float(sc), 4)}
+                      for n, sc in nodes],
+            "clip_scores": [[c, round(float(sc), 4)] for c, sc in LAST.get("clips", [])],
+            "clips": [int(k.split("_")[1]) for k in memories],
+            "edges": edges[:TRACE_EDGES], "n_edges": len(edges)}
+
+
 # retrieve by clip
 def retrieve_from_videograph(video_graph, query, topk=5, mode='max', threshold=0, before_clip=None):
     top_clips = []
@@ -133,6 +159,8 @@ def retrieve_from_videograph(video_graph, query, topk=5, mode='max', threshold=0
         top_clips = [clip_id for clip_id, score in sorted_clips if score >= threshold and clip_id <= before_clip][:topk]
     else:
         top_clips = [clip_id for clip_id, score in sorted_clips if score >= threshold][:topk]
+    LAST.clear()
+    LAST.update(related=related_nodes, nodes=nodes[:TRACE_NODES], clips=sorted_clips[:TRACE_NODES])
     return top_clips, clip_scores, nodes
 
 def get_related_nodes(video_graph, query):
