@@ -17,8 +17,8 @@
 # - paths and vLLM settings as arguments (--model, --tp, ...);
 # - multiple choice: a question with "options" lists them after the question and asks for the letter; the
 #   chosen letter is compared with "answer" (no judge). Upstream's GPT-4o judge for open answers is --judge;
-# - every request seeded (reproducible sampling); searches run in this process (the embedding model is
-#   loaded once) on a cached copy of the graph truncated at the question's before_clip;
+# - every request seeded and vLLM's engine run in this process (the same replies every run, see main); searches run
+#   in this process (the embedding model is loaded once) on a cached copy of the graph truncated at the question's before_clip;
 # - each round's search and the clips it returned are kept (evidence-retrieval scoring), with the memory-graph walk
 #   (retrieve.walk_trace: entry entity nodes, ranked text nodes, their entity edges); results are written
 #   after every batch and a rerun skips the question ids already in --output;
@@ -207,6 +207,12 @@ def main():
     batch_size = processing_config["batch_size"]
     batched_datas = [data[i:i + batch_size] for i in range(0, len(data), batch_size)]
 
+    # vLLM 0.8.4 (V1) by default runs the engine in its own process, which starts stepping as soon as the first
+    # request of a generate() call reaches it: how the prompts are split into prefill chunks and batches, and which
+    # prefixes are already cached, then depend on timing, and so do the logits and the sampled replies, run to run.
+    # In this process, generate() queues every request before the first step: the same replies every run, at the
+    # same decoding settings (VLLM_ENABLE_V1_MULTIPROCESSING=1 restores vLLM's default).
+    os.environ.setdefault("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     from vllm import LLM, SamplingParams
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained(args.model)
